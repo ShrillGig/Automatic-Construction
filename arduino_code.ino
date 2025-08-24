@@ -1,184 +1,186 @@
 #include <TMCStepper.h>
 #include <SoftwareSerial.h>
-#include <Servo.h>       
+#include <Servo.h>
 
-const int MAX_ROWS = 50;
-float world_coord[MAX_ROWS][2]; 
-int currentRow = 0;
-bool printed = false;
-
-// ——— Пины для шаговиков ———
-const int stepPinX = 2, dirPinX = 5;
-const int stepPinY = 3, dirPinY = 6;
-
-#define RX_PIN 10  // Arduino → TMC2208 PDN_UART
-#define TX_PIN 11  // Arduino ← TMC2208 PDN_UART
 #define R_SENSE 0.11f
 
-SoftwareSerial TMCss(RX_PIN, TX_PIN);
-TMC2208Stepper driver(&TMCss, R_SENSE);
+#define EN_PIN 8
+#define RX_PIN 10 
+#define TX_PIN 11
+
+#define CLOSE 0
+#define OPEN 90
 
 
-// ————— Серво (клешня) —————
-Servo claw; 
-const int CLAW_CLOSED_ANGLE = 0;
-const int CLAW_OPEN_ANGLE   = 180;
+SoftwareSerial TMCss(RX_PIN, TX_PIN); //UART connection
+TMC2208Stepper driver(&TMCss, R_SENSE); 
 
-// ——— Механика ———
-const int   microsteps       = 1;       // единичный шаг (чем больше, тем медленне и точнее)
-const float stepAngle        = 1.8;     // градусы полного шага (200 шагов)
-const float leadScrewPitchMm = 5.0;     // мм за оборот винта/ремня
-const float stepsPerRev      = 360.0 / stepAngle * microsteps;  // 200
-const float stepsPerMm       = stepsPerRev / leadScrewPitchMm;  // 200 / 5 = 40 шагов/мм
-const float stepsPerCm       = stepsPerMm * 10.0;               // 400 шагов/см
+Servo claw, lift;
 
-const int stepDelayMicro = 300; // задержка шагового мотора 
-const int Bias = 8; //значение для смещения 
-const int check = 10; //значение для проверки 
+int STEP_PIN_X = 2; int DIR_PIN_X = 5;
+int STEP_PIN_Y = 3; int DIR_PIN_Y = 6;
+
+float step_angle = 1.8f;
+float steps_per_rev = 360 / step_angle;
+int teeth = 20;
+int tooth_pitch = 2;
+int microsteps = 8;
+int steps_per_mm = (steps_per_rev * microsteps) / (tooth_pitch * teeth);
+int steps_per_cm = steps_per_mm * 10;
+
+
+bool start = false;
+bool task = false;
+int value = 0;
+int digit = 0;
+int i = 0;
+int coords[10][2];
+
 
 void setup() {
-  Serial.begin(9600);
-  Serial.println("Receiver ready");
 
-  claw.attach(11);
+Serial.begin(9600);
+TMCss.begin(115200);
 
-  TMCss.begin(9600);
-  driver.begin();
-  driver.microsteps(microsteps);
-  driver.rms_current(1200);  // максимум 1.5А для драйвера, но лучше 80% 
+claw.attach(11);
+lift.attach(10);
 
-  pinMode(stepPinX, OUTPUT);
-  pinMode(dirPinX,  OUTPUT);
-  pinMode(stepPinY, OUTPUT);
-  pinMode(dirPinY,  OUTPUT);
+driver.begin();
+driver.rms_current(1200);
+driver.toff(5);  
+driver.pdn_disable(true);      
+driver.mstep_reg_select(true);
+driver.microsteps(microsteps);
+driver.pwm_autoscale(true); 
+//Serial.print("conn="); Serial.println(driver.test_connection()==0 ? "OK":"FAIL");
+//Serial.print("msteps="); Serial.println(driver.microsteps());  
 
-  int checkX = int(check * stepsPerCm + 0.5f); //сдвиг на 5 см по Х для проверки мотора 
-  int checkY = int(check * stepsPerCm + 0.5f); //сдвиг на 5 см по У для проверки мотора 
-  
+pinMode(EN_PIN, OUTPUT);
+pinMode(STEP_PIN_X, OUTPUT);
+pinMode(DIR_PIN_X, OUTPUT);
+pinMode(STEP_PIN_Y, OUTPUT);
+pinMode(DIR_PIN_Y, OUTPUT);
+digitalWrite(EN_PIN, LOW);
+//digitalWrite(EN_PIN, HIGH);
 
-  //Проверка захвата 
-  delay(3000);
-  claw.write(CLAW_CLOSED_ANGLE);
-  delay(3000);
-  claw.write(CLAW_OPEN_ANGLE);
-  delay(200);
+lift.write(CLOSE);
+delay(1000);
+claw.write(OPEN);
+delay(1000);
 
-  //Проверка моторов 
-  moveAxis(stepPinX, dirPinX, checkX, true);
-  moveAxis(stepPinY, dirPinY, checkY, false);
 
+}
+
+void Step(uint16_t n, int step_axis, int dir_axis, bool move) {
+
+if (move == true) 
+  digitalWrite(dir_axis, LOW);
+if (move == false)
+  digitalWrite(dir_axis, HIGH);
+
+for (uint16_t i = 0; i < n; i++) {
+    digitalWrite(step_axis, HIGH);
+    delayMicroseconds(160);
+    digitalWrite(step_axis, LOW);
+    delayMicroseconds(160);
+  }
   delay(1000);
-
-  moveAxis(stepPinX, dirPinX, checkX, false);
-  moveAxis(stepPinY, dirPinY, checkY, true);
-
-  delay(3000);
 
 }
 
 void loop() {
 
-  // 1) Приём команд a<float> и b<float>
-  if (Serial.available() > 0 && !printed) {
-    char key = Serial.read();
-    if (key == 'a' || key == 'b') {
-      float val = Serial.parseFloat();
-      Serial.readStringUntil('\n');  // сбросить остаток строки
-
-      int col = (key == 'a') ? 0 : 1;
-      if (currentRow < MAX_ROWS) {
-        world_coord[currentRow][col] = val;
-        // Если пришла метка 'b' — завершена пара (x,y)
-        if (key == 'b') {
-          currentRow++;
-        }
-        Serial.println("OK");
-      }
-      return;  // сразу выходим, чтобы не одновременно обрабатывать 'p'
-    }
-
-    // если это не 'a' и не 'b', проверим, нет ли 'p'
-    if (key == 'p') {
-      // Отбросим любой '\r' или '\n' после 'p'
-      if (Serial.peek() == '\r' || Serial.peek() == '\n') {
-        Serial.read();
-        if (Serial.peek() == '\n') {
-          Serial.read();
-        }
-      }
-      // Пришёл запрос печати и оправляем ответ ПК 
-      Serial.println("GOT p");
-      printAllPoints();
-      printed = true;       // отметим, что печатали и двигаемся один раз
-
-      //Функция запуска движения моторов по координатам 
-      executeMovement();
-
-      // Бесконечная пауза — Arduino ничего больше не делает
-      while (true) {
-        ; 
-      }
-    }
-
-    // Если сюда попало что-то другое (нишевые символы), сбросим строку до \n
-    Serial.readStringUntil('\n');
-  }
+if (task == false) {
+if (Serial.available()) {
+char size = Serial.read(); 
+if (!(size == '\n' || size == '\r'))
+{
+digit = size - '0';
+Serial.print(F("Digit: "));
+Serial.println(digit); 
+task = true;
+}
+}
 }
 
-// Печать принятых точек
-void printAllPoints() {
-  Serial.println("All points received:");
-  for (int i = 0; i < currentRow; i++) {
-    Serial.print("[");
-    Serial.print(i);
-    Serial.print("] = ");
-    Serial.print(world_coord[i][0], 2); // x
-    Serial.print(", ");
-    Serial.println(world_coord[i][1], 2); // y
-  }
+if (task == true) {
+if (Serial.available()) {
+char symbol = Serial.read();
+if (!(symbol == '\n' || symbol == '\r'))
+{
+if (symbol == '#' || symbol == '$') 
+value = Serial.parseInt();
+Serial.readStringUntil(';');
+
+if (symbol == '#') {
+  coords[i][0] = value;
+  Serial.print(F("X Value: "));
+  Serial.println(coords[i][0]);
+}
+else if (symbol == '$') {
+  coords[i][1] = value;
+  Serial.print(F("Y Value: "));
+  Serial.println(coords[i][1]);
+  i++;
 }
 
-void executeMovement() {
-
-  for (int j = 0; j < currentRow; j++) {
-    // Конвертация в целое число шагов
-    int stepsX = int(world_coord[j][0] * stepsPerCm + 0.5);  // x → X-ось
-    int stepsY = int(world_coord[j][1] * stepsPerCm + 0.5);  // y → Y-ось
-    int stepsBiasX = int(Bias * stepsPerCm + 0.5f);
-
-    claw.write(CLAW_CLOSED_ANGLE);
-    delay(500);
-
-    moveAxis(stepPinX, dirPinX, stepsBiasX, true); //смещение по оси Х, чтобы не задевать края 
-    delay(3000);
-
-    // ——— 1) Движение вперёд: X и Y — вперед
-    moveAxis(stepPinX, dirPinX, stepsX, true);
-    moveAxis(stepPinY, dirPinY, stepsY, false);
-
-    // Подождать, чтобы убедиться, что моторы встали
-    delay(200);
-
-    // ——— 2) Открываем клешню
-    claw.write(CLAW_OPEN_ANGLE);
-    delay(500);  // даём серво полсекунды «провалиться» в открытое положение
-
-    // ——— 3) Возвращаемся назад (X и Y — назад)
-    moveAxis(stepPinX, dirPinX, stepsX, false);
-    moveAxis(stepPinY, dirPinY, stepsY, true);
-
-    moveAxis(stepPinX, dirPinX, stepsBiasX, false);
-    delay(3000);
-  }
+else if (symbol == 'p') {
+Serial.println("Ok");
+start = true;
+}
+}
+}
 }
 
-// Универсальная функция: “подать X шагов на шаговый мотор”
-void moveAxis(int stepPin, int dirPin, int steps, bool forward) {
-  digitalWrite(dirPin, forward ? HIGH : LOW);
-  for (int i = 0; i < steps; i++) {
-    digitalWrite(stepPin, HIGH);
-    delayMicroseconds(stepDelayMicro);
-    digitalWrite(stepPin, LOW);
-    delayMicroseconds(stepDelayMicro);
-  }
+
+if (start == true) {
+
+delay(3000);
+
+
+Serial.println("READY TO START");
+int check = steps_per_cm * 5;
+claw.write(CLOSE);
+delay(1000);
+lift.write(OPEN);
+delay(1000);
+Step(check, STEP_PIN_X, DIR_PIN_X, true);
+Step(check, STEP_PIN_Y, DIR_PIN_Y, true);
+
+lift.write(CLOSE);
+delay(1000);
+claw.write(OPEN);
+delay(1000);
+Step(check, STEP_PIN_X, DIR_PIN_X, false);
+Step(check, STEP_PIN_Y, DIR_PIN_Y, false);
+
+for (int i = 0; i < digit; i++) {
+
+int x_axis = steps_per_cm * coords[i][0];
+int y_axis = steps_per_cm * coords[i][1];
+int bias_x = steps_per_cm * 8;
+
+lift.write(CLOSE);
+delay(1000);
+claw.write(CLOSE);
+delay(1000);
+lift.write(OPEN);
+delay(1000);
+Step(bias_x, STEP_PIN_X, DIR_PIN_X, true);
+Step(x_axis, STEP_PIN_X, DIR_PIN_X, true);
+Step(y_axis, STEP_PIN_Y, DIR_PIN_Y, true);
+
+lift.write(CLOSE);
+delay(1000);
+claw.write(OPEN);
+delay(1000);
+lift.write(OPEN);
+delay(1000);
+Step(y_axis, STEP_PIN_Y, DIR_PIN_Y, false);
+Step(bias_x, STEP_PIN_X, DIR_PIN_X, false);
+Step(x_axis, STEP_PIN_X, DIR_PIN_X, false);
+
+}
+start = false;
+}
 }
