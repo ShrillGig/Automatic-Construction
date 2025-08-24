@@ -14,7 +14,7 @@ def main():
     t = np.array(cal['t'])
     z = cal['z']
 
-    img = cv2.imread('Cubes-4.jpg')
+    img = cv2.imread('Cubes-3.jpg')
     h, w = img.shape[:2]
 
     newK, _ = cv2.getOptimalNewCameraMatrix(cam, dist, (w, h), 1, (w, h))
@@ -28,40 +28,44 @@ def main():
     corners = rough.squeeze()
 
     convert_coord = camera_to_world_coord(corners, img, fx, fy, cx, cy, R, t, z)
-    result = split_clear_coord(convert_coord)
+    coords = split_clear_coord(convert_coord)
 
     # 5) Выводим:
     print("Coordinates: ")
-    for v in result:
-        print(v)
+    for coord in coords:
+        print(coord)
 
     port = "COM3"
     uart = serial.Serial(port, 9600, timeout=2)
     time.sleep(2)
     uart.reset_input_buffer()
 
-    data = send_to_data(result)
-    uart.write(b"p\n")
+    size = len(coords)
+    uart.write(f"{size}".encode())
+    resp = uart.readline().decode().strip()
+    print(f"Accepted list size: {resp}")
 
-    print("Coords have been sent successfully")
+    for coord in coords:
+        uart.write(f"#{coord[0]};".encode())
+        uart.write(f"${coord[1]};".encode())
+
+    for coord in coords:
+        resp = uart.readline().decode().strip()
+        print(f"Accepted: {resp}")
+        resp = uart.readline().decode().strip()
+        print(f"Accepted: {resp}")
+
+    print("Please enter p to run a program")
+    if input() == 'p':
+        uart.write('p'.encode())
+        resp = uart.readline().decode().strip()
+        print(f"Accepted to run code: {resp}")
+
     uart.close()
 
     cv2.imshow('Frame', img)
     cv2.waitKey(0)
     cv2.destroyAllWindows()
-
-
-def send_to_data (coord):
-
-    for row in coord:
-        for key, val in zip(['a', 'b'],row):
-            msg = f"{key}{val}\n"
-            uart.write(msg.encode())
-            resp = uart.readline().decode().strip()
-            print(f"Sent {msg.strip():6s} → Arduino: {resp}")
-            time.sleep(0.1)
-
-    return 0
 
 
 def camera_to_world_coord(coord, img, fx, fy, cx, cy, R, t, z):
